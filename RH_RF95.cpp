@@ -21,18 +21,6 @@
 RH_RF95* RH_RF95::_deviceForInterrupt[RH_RF95_NUM_INTERRUPTS] = {0, 0, 0};
 uint8_t RH_RF95::_interruptCount = 0; // Index into _deviceForInterrupt for next device
 
-// These are indexed by the values of ModemConfigChoice
-// Stored in flash (program) memory to save SRAM
-PROGMEM static const RH_RF95::ModemConfig MODEM_CONFIG_TABLE[] =
-{
-    //  1d,     1e,      26
-    { 0x72,   0x74,    0x04}, // Bw125Cr45Sf128 (the chip default), AGC enabled
-    { 0x92,   0x74,    0x04}, // Bw500Cr45Sf128, AGC enabled
-    { 0x48,   0x94,    0x04}, // Bw31_25Cr48Sf512, AGC enabled
-    { 0x78,   0xc4,    0x0c}, // Bw125Cr48Sf4096, AGC enabled
-
-};
-
 RH_RF95::RH_RF95(uint8_t slaveSelectPin, uint8_t interruptPin, RHGenericSPI& spi)
     :
     RHSPIDriver(slaveSelectPin, spi),
@@ -149,6 +137,29 @@ bool RH_RF95::init()
     return true;
 }
 
+
+void RH_RF95::setRxCrcErrIrqF(void (*fn)(void))
+{
+    _rxCrcErrIrqF = fn;
+}
+
+void RH_RF95::setRxGoodIrqF(void (*fn)(void))
+{
+    _rxGoodIrqF = fn;
+}
+
+void RH_RF95::setTxDoneIrqF(void (*fn)())
+{
+
+    _txDoneIrqF = fn;
+}
+
+void RH_RF95::setCadIrqF(void (*fn)())
+{
+    _cadIrqF = fn;
+}
+
+
 // C++ level interrupt handler for this instance
 // LORA is unusual in that it has several interrupt lines, and not a single, combined one.
 // On MiniWirelessLoRa, only one of the several interrupt lines (DI0) from the RFM95 is usefuly
@@ -162,56 +173,72 @@ void RH_RF95::handleInterrupt()
     // in the header. If not it might be a stray (noise) packet.*
     uint8_t crc_present = spiRead(RH_RF95_REG_1C_HOP_CHANNEL);
 
+    // Rx error
     if (_mode == RHModeRx
-	&& ((irq_flags & (RH_RF95_RX_TIMEOUT | RH_RF95_PAYLOAD_CRC_ERROR))
+        && ((irq_flags & (RH_RF95_RX_TIMEOUT | RH_RF95_PAYLOAD_CRC_ERROR))
 	    | !(crc_present & RH_RF95_RX_PAYLOAD_CRC_IS_ON)))
-//    if (_mode == RHModeRx && irq_flags & (RH_RF95_RX_TIMEOUT | RH_RF95_PAYLOAD_CRC_ERROR))
     {
-	_rxBad++;
+        _rxBad++;
+        if(_rxCrcErrIrqF != NULL)
+            _rxCrcErrIrqF();
     }
-    else if (_mode == RHModeRx && irq_flags & RH_RF95_RX_DONE)
+    else
+    if (_mode == RHModeRx && irq_flags & RH_RF95_RX_DONE) // Rx okay
     {
-	// Have received a packet
-	uint8_t len = spiRead(RH_RF95_REG_13_RX_NB_BYTES);
+    	// Have received a packet
+    	uint8_t len = spiRead(RH_RF95_REG_13_RX_NB_BYTES);
 
-	// Reset the fifo read ptr to the beginning of the packet
-	spiWrite(RH_RF95_REG_0D_FIFO_ADDR_PTR, spiRead(RH_RF95_REG_10_FIFO_RX_CURRENT_ADDR));
-	spiBurstRead(RH_RF95_REG_00_FIFO, _buf, len);
-	_bufLen = len;
-	spiWrite(RH_RF95_REG_12_IRQ_FLAGS, 0xff); // Clear all IRQ flags
+    	// Reset the fifo read ptr to the beginning of the packet
+    	spiWrite(RH_RF95_REG_0D_FIFO_ADDR_PTR, spiRead(RH_RF95_REG_10_FIFO_RX_CURRENT_ADDR));
+    	spiBurstRead(RH_RF95_REG_00_FIFO, _buf, len);
+    	_bufLen = len;
+    	spiWrite(RH_RF95_REG_12_IRQ_FLAGS, 0xff); // Clear all IRQ flags
 
-	// Remember the last signal to noise ratio, LORA mode
-	// Per page 111, SX1276/77/78/79 datasheet
-	_lastSNR = (int8_t)spiRead(RH_RF95_REG_19_PKT_SNR_VALUE) / 4;
+    	// Remember the last signal to noise ratio, LORA mode
+    	// Per page 111, SX1276/77/78/79 datasheet
+    	_lastSNR = (int8_t)spiRead(RH_RF95_REG_19_PKT_SNR_VALUE) / 4;
 
-	// Remember the RSSI of this packet, LORA mode
-	// this is according to the doc, but is it really correct?
-	// weakest receiveable signals are reported RSSI at about -66
-	_lastRssi = spiRead(RH_RF95_REG_1A_PKT_RSSI_VALUE);
-	// Adjust the RSSI, datasheet page 87
-	if (_lastSNR < 0)
-	    _lastRssi = _lastRssi + _lastSNR;
-	else
-	    _lastRssi = (int)_lastRssi * 16 / 15;
-	if (_usingHFport)
-	    _lastRssi -= 157;
-	else
-	    _lastRssi -= 164;
+    	// Remember the RSSI of this packet, LORA mode
+    	// this is according to the doc, but is it really correct?
+    	// weakest receiveable signals are reported RSSI at about -66
+    	_lastRssi = spiRead(RH_RF95_REG_1A_PKT_RSSI_VALUE);
+    	// Adjust the RSSI, datasheet page 87
+    	if (_lastSNR < 0)
+    	    _lastRssi = _lastRssi + _lastSNR;
+    	else
+    	    _lastRssi = (int)_lastRssi * 16 / 15;
+    	if (_usingHFport)
+    	    _lastRssi -= 157;
+    	else
+    	    _lastRssi -= 164;
 
-	// We have received a message.
-	validateRxBuf();
-	if (_rxBufValid)
-	    setModeIdle(); // Got one
+    	// We have received a message.
+    	validateRxBuf();
+    	if (_rxBufValid)
+        {
+    	    setModeIdle(); // Got one
+            if(_rxGoodIrqF != NULL)
+                _rxGoodIrqF();
+        }
+
+
     }
     else if (_mode == RHModeTx && irq_flags & RH_RF95_TX_DONE)
     {
-	_txGood++;
-	setModeIdle();
+        // Tx good
+    	_txGood++;
+    	setModeIdle();
+        if(_txDoneIrqF != NULL)
+            _txDoneIrqF();
     }
     else if (_mode == RHModeCad && irq_flags & RH_RF95_CAD_DONE)
     {
+        // Channel activity detection
         _cad = irq_flags & RH_RF95_CAD_DETECTED;
         setModeIdle();
+        if(_cadIrqF != NULL)
+            _cadIrqF();
+
     }
     // Sigh: on some processors, for some unknown reason, doing this only once does not actually
     // clear the radio's interrupt flag. So we do it twice. Why?
@@ -431,26 +458,25 @@ void RH_RF95::setTxPower(int8_t power, bool useRFO)
     }
 }
 
-// Sets registers from a canned modem configuration structure
-void RH_RF95::setModemRegisters(const ModemConfig* config)
+// Set the generated modem config, if the proper types are used there should be no problem ever
+void RH_RF95::setModemConfig(const ModemConfig config)
 {
-    spiWrite(RH_RF95_REG_1D_MODEM_CONFIG1,       config->reg_1d);
-    spiWrite(RH_RF95_REG_1E_MODEM_CONFIG2,       config->reg_1e);
-    spiWrite(RH_RF95_REG_26_MODEM_CONFIG3,       config->reg_26);
+    
+    spiWrite(RH_RF95_REG_1D_MODEM_CONFIG1,       config.reg_1d);
+    spiWrite(RH_RF95_REG_1E_MODEM_CONFIG2,       config.reg_1e);
+    spiWrite(RH_RF95_REG_26_MODEM_CONFIG3,       config.reg_26);
 }
 
-// Set one of the canned FSK Modem configs
-// Returns true if its a valid choice
-bool RH_RF95::setModemConfig(ModemConfigChoice index)
+
+RH_RF95::ModemConfig RH_RF95::generateModemConfig(loraBwChoices bw, loraCrChoices cr, loraSfChoices sf, bool agcOn, bool staticMoving)
 {
-    if (index > (signed int)(sizeof(MODEM_CONFIG_TABLE) / sizeof(ModemConfig)))
-        return false;
+    ModemConfig gendConfig;
 
-    ModemConfig cfg;
-    memcpy_P(&cfg, &MODEM_CONFIG_TABLE[index], sizeof(RH_RF95::ModemConfig));
-    setModemRegisters(&cfg);
+    gendConfig.reg_1d = (bw << 4) | (cr << 1);
+    gendConfig.reg_1e = (sf << 4) | (1 << 2); // bit 2 = crc enable
+    gendConfig.reg_26 = ((uint8_t) agcOn << 2) | ((uint8_t) staticMoving << 3);
 
-    return true;
+    return gendConfig; 
 }
 
 void RH_RF95::setPreambleLength(uint16_t bytes)

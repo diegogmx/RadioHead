@@ -237,6 +237,9 @@
 #define RH_RF95_PA_DAC_DISABLE                        0x04
 #define RH_RF95_PA_DAC_ENABLE                         0x07
 
+
+
+
 /////////////////////////////////////////////////////////////////////
 /// \class RH_RF95 RH_RF95.h <RH_RF95.h>
 /// \brief Driver to send and receive unaddressed, unreliable datagrams via a LoRa 
@@ -572,27 +575,56 @@ public:
 	uint8_t    reg_1e;   ///< Value for register RH_RF95_REG_1E_MODEM_CONFIG2
 	uint8_t    reg_26;   ///< Value for register RH_RF95_REG_26_MODEM_CONFIG3
     } ModemConfig;
-  
-    /// Choices for setModemConfig() for a selected subset of common
-    /// data rates. If you need another configuration,
-    /// determine the necessary settings and call setModemRegisters() with your
-    /// desired settings. It might be helpful to use the LoRa calculator mentioned in 
+
+    const ModemConfig Bw125Cr45Sf128		= {0x72,   0x74,    0x04}; // Bw125Cr45Sf128 (the chip default), AGC enabled
+    const ModemConfig Bw500Cr45Sf128		= {0x92,   0x74,    0x04}; // Bw500Cr45Sf128, AGC enabled
+    const ModemConfig Bw31_25Cr48Sf512	= {0x48,   0x94,    0x04}; // Bw31_25Cr48Sf512, AGC enabled
+    const ModemConfig Bw125Cr48Sf4096	= {0x78,   0xc4,    0x0c}; // Bw125Cr48Sf4096, AGC enabled, Mobile
+
+    /// Available modulation parameters for generateModemConfig, default modulation is Bw125Cr45Sf128
+    /// Typical modulations in other versions of RH are Bw500Cr45Sf128, Bw31_25Cr48Sf512 and Bw125Cr48Sf4096
+    /// It might be helpful to use the LoRa calculator mentioned in 
     /// http://www.semtech.com/images/datasheet/LoraDesignGuide_STD.pdf
-    /// These are indexes into MODEM_CONFIG_TABLE. We strongly recommend you use these symbolic
-    /// definitions and not their integer equivalents: its possible that new values will be
-    /// introduced in later versions (though we will try to avoid it).
     /// Caution: if you are using slow packet rates and long packets with RHReliableDatagram or subclasses
     /// you may need to change the RHReliableDatagram timeout for reliable operations.
     /// Caution: for some slow rates nad with ReliableDatagrams youi may need to increase the reply timeout 
-    /// with manager.setTimeout() to
-    /// deal with the long transmission times.
+    /// with manager.setTimeout()
+
+    /// bandwidth choices
     typedef enum
     {
-	Bw125Cr45Sf128 = 0,	   ///< Bw = 125 kHz, Cr = 4/5, Sf = 128chips/symbol, CRC on. Default medium range
-	Bw500Cr45Sf128,	           ///< Bw = 500 kHz, Cr = 4/5, Sf = 128chips/symbol, CRC on. Fast+short range
-	Bw31_25Cr48Sf512,	   ///< Bw = 31.25 kHz, Cr = 4/8, Sf = 512chips/symbol, CRC on. Slow+long range
-	Bw125Cr48Sf4096,           ///< Bw = 125 kHz, Cr = 4/8, Sf = 4096chips/symbol, CRC on. Slow+long range
-    } ModemConfigChoice;
+    	Bw7_8k = 0,
+    	Bw10_4k,
+    	Bw15_6k,
+    	Bw20_8k,
+    	Bw31_25k,
+    	Bw41_7k,
+    	Bw62_5k,
+    	Bw125k,
+    	Bw250k,
+    	Bw500k
+    } loraBwChoices;
+
+    /// Coding rate choices
+    typedef	enum
+    {
+    	cr4_5 = 1,
+    	cr4_6,
+    	cr4_7,
+    	cr4_8
+    } loraCrChoices;
+
+    /// Spreading factor choices
+    typedef enum
+    {
+    	sf_64	= 6,
+    	sf_128,
+    	sf_256,
+    	sf_512,
+    	sf_1024,
+    	sf_2048,
+    	sf_4096
+    } loraSfChoices;
 
     /// Constructor. You can have multiple instances, but each instance must have its own
     /// interrupt and slave select pin. After constructing, you must call init() to initialise the interface
@@ -614,11 +646,17 @@ public:
     /// \param[in] spi Pointer to the SPI interface object to use. 
     ///                Defaults to the standard Arduino hardware SPI interface
     RH_RF95(uint8_t slaveSelectPin = SS, uint8_t interruptPin = 2, RHGenericSPI& spi = hardware_spi);
-  
+
     /// Initialise the Driver transport hardware and software.
     /// Make sure the Driver is properly configured before calling init().
     /// \return true if initialisation succeeded.
     virtual bool    init();
+
+    void setRxCrcErrIrqF(void (*fn)());
+    void setRxGoodIrqF(void (*fn)());
+    void setTxDoneIrqF(void (*fn)());
+    void setCadIrqF(void (*fn)());
+
 
     /// Prints the value of all chip registers
     /// to the Serial device if RH_HAVE_SERIAL is defined for the current platform
@@ -626,19 +664,22 @@ public:
     /// \return true on success
     bool printRegisters();
 
-    /// Sets all the registered required to configure the data modem in the RF95/96/97/98, including the bandwidth, 
-    /// spreading factor etc. You can use this to configure the modem with custom configurations if none of the 
-    /// canned configurations in ModemConfigChoice suit you.
-    /// \param[in] config A ModemConfig structure containing values for the modem configuration registers.
-    void           setModemRegisters(const ModemConfig* config);
+    /// There are too many possible configurations for lora in terms of bandwidth coding rate and spreading factors
+    /// to make a list of them, that merits a function that creates the configuration struct based on the desired parameters
+    /// by default when calling init Bw125Cr45Sf128 AGC on is selected
+    /// \param[in] Bandwidth from loraBwChoices.
+    /// \param[in] Coding rate from loraCrChoices.
+    /// \param[in] Spreading factors from loraSfChoices.
+    /// \param[in] AGC on.
+    /// \param[in] Static or moving node (static = 0).
+    ModemConfig	generateModemConfig(loraBwChoices bw, loraCrChoices cr, loraSfChoices sf, bool agcOn, bool staticMoving);
 
-    /// Select one of the predefined modem configurations. If you need a modem configuration not provided 
-    /// here, use setModemRegisters() with your own ModemConfig.
+    /// Set the modem configuration generated by generateModemConfig
     /// Caution: the slowest protocols may require a radio module with TCXO temperature controlled oscillator
     /// for reliable operation.
     /// \param[in] index The configuration choice.
     /// \return true if index is a valid choice.
-    bool        setModemConfig(ModemConfigChoice index);
+    void	setModemConfig(const ModemConfig config);
 
     /// Tests whether a new message is available
     /// from the Driver. 
@@ -816,6 +857,20 @@ private:
 
     // Last measured SNR, dB
     int8_t              _lastSNR;
+
+    // Pointer to function on Rx CRC error
+    void (*_rxCrcErrIrqF)(void);
+
+    // Pointer to function on Rx packet good
+    void (*_rxGoodIrqF)(void);
+
+    // Pointer to function on Tx done
+    void (*_txDoneIrqF)(void);
+
+    // Pointer to function on CAD
+    void (*_cadIrqF)(void);
+
+
 };
 
 /// @example rf95_client.pde
